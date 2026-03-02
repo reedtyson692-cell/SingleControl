@@ -22,6 +22,72 @@ TimerPulseCtrl* MainWindow::timerPulseCtrl = NULL;
 MotionCal* MainWindow::motioncal = NULL;
 DataLogger* MainWindow::dataLogger = NULL;
 DeviceManager* MainWindow::manager = NULL;
+// 日志分流静态队列定义：主控回调 push，写盘线程 pop
+LockFreeRingBuffer<SystemLogFrame, 8192> MainWindow::g_logBuffer;
+
+// 构造：仅做轻量初始化，不触发 I/O
+DataSaveThread::DataSaveThread(QObject* parent)
+	: QThread(parent), m_ringBuffer(NULL), m_running(false), m_csvFile(NULL)
+{
+}
+
+DataSaveThread::~DataSaveThread()
+{
+	stopThread();
+}
+
+// 启动日志：创建 CSV 并以低优先级启动消费者线程
+void DataSaveThread::startLogging(const QString& fileName)
+{
+	m_csvFile = fopen(fileName.toLocal8Bit().data(), "w");
+	if (!m_csvFile) {
+		return;
+	}
+	fprintf(m_csvFile, "Timestamp,Down_P0,Down_P1,Down_P2,Down_P3,Down_P4,Down_P5,Down_T0,Down_T1,Down_T2,Down_T3,Down_T4,Down_T5,Down_Roll,Down_Pitch,Down_Yaw,Up_P0,Up_P1,Up_P2,Up_P3,Up_P4,Up_P5,Up_T0,Up_T1,Up_T2,Up_T3,Up_T4,Up_T5,Up_Roll,Up_Pitch,Up_Yaw\n");
+	fflush(m_csvFile);
+	m_running.store(true);
+	start(QThread::LowPriority);
+}
+
+// 停止线程：必须 wait() 等待 run 退出，避免 QThread 析构风险
+void DataSaveThread::stopThread()
+{
+	if (m_running.load()) {
+		m_running.store(false);
+		wait();
+	}
+	if (m_csvFile) {
+		fclose(m_csvFile);
+		m_csvFile = NULL;
+	}
+}
+
+// 消费循环：批量取队列数据写盘；无数据时短睡眠降 CPU 占用
+void DataSaveThread::run()
+{
+	SystemLogFrame frame;
+	while (m_running.load()) {
+		bool hasData = false;
+		// 批量写：尽可能在一次唤醒中清空当前积压
+		while (m_ringBuffer && m_ringBuffer->pop(frame)) {
+			hasData = true;
+			fprintf(m_csvFile, "%lu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+				frame.timestamp,
+				frame.down_pos[0], frame.down_pos[1], frame.down_pos[2], frame.down_pos[3], frame.down_pos[4], frame.down_pos[5],
+				frame.down_thrust[0], frame.down_thrust[1], frame.down_thrust[2], frame.down_thrust[3], frame.down_thrust[4], frame.down_thrust[5],
+				frame.down_roll, frame.down_pitch, frame.down_yaw,
+				frame.up_pos[0], frame.up_pos[1], frame.up_pos[2], frame.up_pos[3], frame.up_pos[4], frame.up_pos[5],
+				frame.up_thrust[0], frame.up_thrust[1], frame.up_thrust[2], frame.up_thrust[3], frame.up_thrust[4], frame.up_thrust[5],
+				frame.up_roll, frame.up_pitch, frame.up_yaw);
+		}
+		if (hasData) {
+			fflush(m_csvFile);
+		}
+		else {
+			msleep(10);
+		}
+	}
+}
 //CSerialPort* MainWindow::mySerialPort = NULL;
 static int i = 0;
 static float nowpos = 0;//推杆伸长量
@@ -71,7 +137,8 @@ ControlIntermediateQuantity m_ControlIntermediateQuantity;
 //U16 No;
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
-    ui(new Ui::MainWindow)
+    ui(new Ui::MainWindow),
+	m_saveThread(NULL)
 {
     ui->setupUi(this);// 初始化UI组件
 	ui->start->setCheckable(true);// 设置“伺服启动”开关按钮为可选中状态
@@ -323,25 +390,11 @@ MainWindow::MainWindow(QWidget *parent) :
 	timerPulseCtrl->addTimerTickHandler(OnCounterEvent, this);//注册硬件定时中断回调函数OnCounterEvent：中断处理函数的函数指针，this：传递给回调函数的上下文指针（当前MainWindow实例）
 	initSystemStruct(); //初始化运动控制系统的状态和参数
 
-	// ============ 【修改3：在构造函数末尾新增独立的存盘定时器】 ============
-	QTimer* logTimer = new QTimer(this);
-	connect(logTimer, &QTimer::timeout, [=]() {
-		// 只有当定时器中断开启（伺服启动）时，才记录数据
-		if (timerPulseCtrl && timerPulseCtrl->getEnabled()) {
-			// 保存力传感器数据
-			forceData = manager->GetForceSensorData();
-			if (forceData.IsValid()) {
-				dataLogger->LogForceData(forceData);
-			}
-			// 保存上平台数据
-			imuData[0] = manager->GetIMUData(0);
-			dataLogger->LogIMUData(0, imuData[0], current_pos1, current_thrust_N1);
-			// 保存下平台数据
-			imuData[1] = manager->GetIMUData(1);
-			dataLogger->LogIMUData(1, imuData[1], current_pos, current_thrust_N);
-		}
-		});
-	logTimer->start(200); // 严格设定为 200ms 执行一次
+	// ============ 【日志分流：启动独立低优先级存储线程】 ============
+	m_saveThread = new DataSaveThread(this);
+	m_saveThread->m_ringBuffer = &g_logBuffer;
+	QString filename = QString("MotionData_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+	m_saveThread->startLogging(filename);
 	// =========================================================================
 }
 //初始化系统指令
@@ -367,6 +420,9 @@ void MainWindow::initSystemStruct()
 
 MainWindow::~MainWindow()
 {
+	if (m_saveThread) {
+		m_saveThread->stopThread();
+	}
 	delete motioncal;
 	delete mEtherCatBus;
 	delete dataLogger;
@@ -1207,6 +1263,23 @@ void MainWindow::OnCounterEvent(void *sender, CntrEventArgs *args, void * userPa
 		}
 		default:
 			break;
+		}
+		// 高频路径仅做快照入队，严禁直接磁盘 I/O
+		if (timerPulseCtrl && timerPulseCtrl->getEnabled()) {
+			SystemLogFrame frame;
+			frame.timestamp = GetTickCount();
+			frame.down_roll = roll;
+			frame.down_pitch = pitch;
+			frame.down_yaw = yaw;
+			frame.up_roll = round(imuData[0].angles[0] * 100) / 100;
+			frame.up_pitch = round(imuData[0].angles[1] * 100) / 100;
+			frame.up_yaw = round(imuData[0].angles[2] * 100) / 100;
+			memcpy(frame.down_pos, current_pos, sizeof(current_pos));
+			memcpy(frame.down_thrust, current_thrust_N, sizeof(current_thrust_N));
+			memcpy(frame.up_pos, current_pos1, sizeof(current_pos1));
+			memcpy(frame.up_thrust, current_thrust_N1, sizeof(current_thrust_N1));
+			// 入队失败（队列满）时直接丢弃当前帧，保证控制回路不被阻塞
+			g_logBuffer.push(frame);
 		}
 		updataInfoCounter = 0;
 	}
