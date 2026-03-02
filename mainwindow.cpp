@@ -43,7 +43,7 @@ void DataSaveThread::startLogging(const QString& fileName)
 	if (!m_csvFile) {
 		return;
 	}
-	fprintf(m_csvFile, "Timestamp,Down_P0,Down_P1,Down_P2,Down_P3,Down_P4,Down_P5,Down_T0,Down_T1,Down_T2,Down_T3,Down_T4,Down_T5,Down_Roll,Down_Pitch,Down_Yaw,Up_P0,Up_P1,Up_P2,Up_P3,Up_P4,Up_P5,Up_T0,Up_T1,Up_T2,Up_T3,Up_T4,Up_T5\n");
+	fprintf(m_csvFile, "Timestamp,Down_P0,Down_P1,Down_P2,Down_P3,Down_P4,Down_P5,Down_T0,Down_T1,Down_T2,Down_T3,Down_T4,Down_T5,Down_Roll,Down_Pitch,Down_Yaw,Up_P0,Up_P1,Up_P2,Up_P3,Up_P4,Up_P5,Up_T0,Up_T1,Up_T2,Up_T3,Up_T4,Up_T5,Up_Roll,Up_Pitch,Up_Yaw\n");
 	fflush(m_csvFile);
 	m_running.store(true);
 	start(QThread::LowPriority);
@@ -71,13 +71,14 @@ void DataSaveThread::run()
 		// 批量写：尽可能在一次唤醒中清空当前积压
 		while (m_ringBuffer && m_ringBuffer->pop(frame)) {
 			hasData = true;
-			fprintf(m_csvFile, "%lu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+			fprintf(m_csvFile, "%lu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
 				frame.timestamp,
 				frame.down_pos[0], frame.down_pos[1], frame.down_pos[2], frame.down_pos[3], frame.down_pos[4], frame.down_pos[5],
 				frame.down_thrust[0], frame.down_thrust[1], frame.down_thrust[2], frame.down_thrust[3], frame.down_thrust[4], frame.down_thrust[5],
 				frame.down_roll, frame.down_pitch, frame.down_yaw,
 				frame.up_pos[0], frame.up_pos[1], frame.up_pos[2], frame.up_pos[3], frame.up_pos[4], frame.up_pos[5],
-				frame.up_thrust[0], frame.up_thrust[1], frame.up_thrust[2], frame.up_thrust[3], frame.up_thrust[4], frame.up_thrust[5]);
+				frame.up_thrust[0], frame.up_thrust[1], frame.up_thrust[2], frame.up_thrust[3], frame.up_thrust[4], frame.up_thrust[5],
+				frame.up_roll, frame.up_pitch, frame.up_yaw);
 		}
 		if (hasData) {
 			fflush(m_csvFile);
@@ -1270,6 +1271,9 @@ void MainWindow::OnCounterEvent(void *sender, CntrEventArgs *args, void * userPa
 			frame.down_roll = roll;
 			frame.down_pitch = pitch;
 			frame.down_yaw = yaw;
+			frame.up_roll = round(imuData[0].angles[0] * 100) / 100;
+			frame.up_pitch = round(imuData[0].angles[1] * 100) / 100;
+			frame.up_yaw = round(imuData[0].angles[2] * 100) / 100;
 			memcpy(frame.down_pos, current_pos, sizeof(current_pos));
 			memcpy(frame.down_thrust, current_thrust_N, sizeof(current_thrust_N));
 			memcpy(frame.up_pos, current_pos1, sizeof(current_pos1));

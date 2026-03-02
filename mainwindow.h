@@ -98,6 +98,9 @@ struct SystemLogFrame
 	double down_yaw;
 	double up_pos[6];
 	double up_thrust[6];
+	double up_roll;
+	double up_pitch;
+	double up_yaw;
 
 	SystemLogFrame()
 	{
